@@ -19,6 +19,7 @@ const state = {
   monthData: null,
   agent: null,
   attendance: { images: [], review: null, analyzing: false, month: null },
+  people: { images: [], review: null, analyzing: false, month: null, matrix: null },
   generating: null, // { done, total }
   journalFilter: 'entries',
   editing: {}, // date -> true
@@ -53,6 +54,7 @@ async function init() {
   document.body.classList.add('platform-' + state.info.platform);
   state.month = state.info.currentMonth;
   state.attendance.month = state.info.currentMonth;
+  state.people.month = state.info.currentMonth;
   await loadSettings();
   await Promise.all([loadMonth(), loadAgent()]);
 
@@ -64,6 +66,7 @@ async function init() {
 
   api.on('agent:status', (s) => { state.agent = s; renderSidebar(); if (state.view === 'dashboard') render(); });
   api.on('topics:progress', (p) => { state.generating = p.done < p.total ? p : null; if (state.view === 'journal') render(); });
+  api.on('participants:progress', (p) => { state.people.progress = p; if (state.view === 'people' && state.people.analyzing) { const el = document.getElementById('people-progress'); if (el) el.textContent = `Odczytano ${p.done} z ${p.total} zdjęć…`; } });
   api.on('data:changed', async () => { await loadMonth(); if (state.view !== 'attendance') render(); else renderSidebar(); });
   render();
 }
@@ -99,6 +102,7 @@ function renderSidebar() {
   const items = [
     ['dashboard', 'home', 'Pulpit'],
     ['attendance', 'camera', 'Lista obecności'],
+    ['people', 'people', 'Uczestnicy'],
     ['journal', 'book', 'Dziennik', missing > 0 ? missing : null],
     ['calendar', 'calendar', 'Kalendarz']
   ];
@@ -136,11 +140,11 @@ async function runAgent() {
 function render() {
   renderSidebar();
   const c = document.getElementById('content');
-  const views = { dashboard: viewDashboard, attendance: viewAttendance, journal: viewJournal, calendar: viewCalendar, settings: viewSettings };
+  const views = { dashboard: viewDashboard, attendance: viewAttendance, people: viewPeople, journal: viewJournal, calendar: viewCalendar, settings: viewSettings };
   const el = views[state.view]();
   el.classList.add('fade-in');
   c.replaceChildren(el);
-  document.getElementById('window-title').textContent = { dashboard: 'Pulpit', attendance: 'Lista obecności', journal: 'Dziennik', calendar: 'Kalendarz', settings: 'Ustawienia' }[state.view] + ' — Dziennik WTZ';
+  document.getElementById('window-title').textContent = { dashboard: 'Pulpit', attendance: 'Lista obecności', people: 'Uczestnicy', journal: 'Dziennik', calendar: 'Kalendarz', settings: 'Ustawienia' }[state.view] + ' — Dziennik WTZ';
 }
 
 function monthNav(onChange) {
@@ -379,6 +383,158 @@ function attendanceHistory() {
     att.slice().reverse().map((x) => h('div', { class: 'up-item' }, iconEl('checkCircle', 16), h('span', null, new Date(x.at).toLocaleString('pl-PL')), h('span', { class: 'muted' }, ` · ${x.days || 0} dni obecności`))));
 }
 
+// ───────────────────────── UCZESTNICY ─────────────────────────
+const peopleInput = h('input', { type: 'file', accept: 'image/*', multiple: true, style: { display: 'none' } });
+document.body.appendChild(peopleInput);
+peopleInput.addEventListener('change', async () => {
+  for (const f of [...peopleInput.files]) { try { state.people.images.push(await prepareImage(f)); } catch (e) { errToast(e); } }
+  peopleInput.value = ''; state.people.review = null; render();
+});
+
+function viewPeople() {
+  const P = state.people;
+  if (!P.matrix || P.matrix.key !== P.month) {
+    api.participantsMatrix(P.month).then((m) => { P.matrix = { key: P.month, ...m }; if (state.view === 'people') render(); }).catch(errToast);
+  }
+  const monthSel = h('div', { class: 'segmented' },
+    h('button', { onclick: () => { P.month = shiftMonth(P.month, -1); P.review = null; render(); }, html: icon('chevronL', 14) }),
+    h('button', { class: 'active', style: { minWidth: '140px', justifyContent: 'center' } }, monthLabel(P.month)),
+    h('button', { onclick: () => { P.month = shiftMonth(P.month, 1); P.review = null; render(); }, html: icon('chevronR', 14) }));
+
+  const dz = h('div', { class: 'dropzone', onclick: () => peopleInput.click() },
+    h('div', { class: 'dz-ic', style: { background: 'linear-gradient(145deg,#bf5af2,#5856d6)' }, html: icon('people', 30) }),
+    h('h2', null, 'Wyślij listę obecności uczestników'),
+    h('p', null, 'Roczne karty „Wykaz obecności uczestnika” (dni × miesiące) albo miesięczna lista grupy. Możesz dodać od razu wiele zdjęć – po jednym na uczestnika.'),
+    h('div', { style: { marginTop: '16px' } }, h('button', { class: 'btn primary lg', onclick: (e) => { e.stopPropagation(); peopleInput.click(); } }, iconEl('upload', 16), 'Wybierz zdjęcie')));
+  ['dragenter', 'dragover'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add('over'); }));
+  ['dragleave', 'drop'].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove('over'); }));
+  dz.addEventListener('drop', async (e) => { for (const f of [...e.dataTransfer.files]) { try { P.images.push(await prepareImage(f)); } catch (er) { errToast(er); } } P.review = null; render(); });
+
+  const analyzeBtn = h('button', { class: 'btn primary lg', disabled: !P.images.length || P.analyzing }, iconEl('sparkles', 16), 'Analizuj z Claude');
+  analyzeBtn.addEventListener('click', async () => {
+    P.analyzing = true; P.review = null; render();
+    try {
+      const r = await api.analyzeParticipants(P.month, P.images.map(({ data, mediaType }) => ({ data, mediaType })));
+      P.review = r;
+      if (r.month && r.month !== P.month) toast(`Na zdjęciu rozpoznano miesiąc ${monthLabel(r.month)}.`, 'info', 6000);
+    } catch (e) { errToast(e); }
+    P.analyzing = false; render();
+  });
+
+  return h('div', null,
+    h('div', { class: 'toolbar' }, h('h1', null, 'Uczestnicy'), h('div', { class: 'spacer' }), h('span', { class: 'muted' }, 'Miesiąc listy:'), monthSel),
+    h('div', { class: 'page' },
+      P.images.length ? h('div', { class: 'card card-pad' },
+        h('div', { class: 'card-title' }, h('span', { html: icon('photo', 16) }), `Lista obecności uczestników – ${monthLabel(P.month)}`, h('span', { class: 'spacer' }),
+          h('button', { class: 'btn sm', onclick: () => { P.images = []; P.review = null; render(); } }, 'Wyczyść')),
+        h('div', { class: 'thumbs' }, P.images.map((img, i) => h('div', { class: 'thumb' },
+          h('img', { src: img.dataUrl, onclick: () => previewImage(img) }),
+          h('button', { class: 'rm', onclick: () => { P.images.splice(i, 1); P.review = null; render(); }, html: icon('x', 12) }),
+          h('span', { class: 'pg' }, `Strona ${i + 1}`))),
+        h('div', { class: 'thumb add', onclick: () => peopleInput.click() }, iconEl('plus', 22), h('span', { class: 'small' }, 'Dodaj stronę'))),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '12px', marginTop: '18px' } }, analyzeBtn,
+          h('span', { class: 'muted small' }, providerLabel() + ' odczyta nazwiska i obecności w kolejnych dniach.'))) : dz,
+      P.analyzing ? h('div', { class: 'card analyzing', style: { marginTop: '16px' } }, spinner(22), h('div', { style: { flex: 1 } }, h('div', { style: { fontWeight: 600, marginBottom: '4px' } }, 'Agent odczytuje listy uczestników…'), h('div', { id: 'people-progress', class: 'muted small', style: { marginBottom: '8px' } }, `0 z ${P.images.length} zdjęć`), h('div', { class: 'shimmer', style: { width: '70%' } }))) : null,
+      P.review ? peopleReview() : null,
+      peopleMatrix()));
+}
+
+function daysInMonth(key) { const [y, m] = key.split('-').map(Number); return new Date(y, m, 0).getDate(); }
+
+function peopleReview() {
+  const P = state.people;
+  const rv = P.review;
+  const head = h('tr', null, h('th', { class: 'sticky-col' }, 'Uczestnik / miesiąc'), Array.from({ length: 31 }, (_, i) => h('th', { class: 'mx-day' }, i + 1)), h('th', null, 'Σ'));
+  const rows = [];
+  rv.participants.forEach((p) => {
+    const months = Object.keys(p.months).sort();
+    months.forEach((k, mi) => {
+      const set = new Set(p.months[k]);
+      const unc = new Set((p.uncertain || {})[k] || []);
+      const n = daysInMonth(k);
+      const sum = h('td', { class: 'muted small' }, String(set.size));
+      const [y, mo] = k.split('-').map(Number);
+      rows.push(h('tr', { class: (p.skip ? 'off' : '') + (mi === 0 ? ' first-of-person' : '') },
+        h('td', { class: 'sticky-col' }, mi === 0
+          ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '6px' } },
+            h('input', { type: 'checkbox', checked: !p.skip, title: 'Uwzględnij', onchange: (e) => { p.skip = !e.target.checked; render(); } }),
+            h('input', { class: 'input', style: { width: '150px', height: '24px' }, value: p.name, onchange: (e) => { p.name = e.target.value; } }),
+            p.matched ? h('span', { class: 'chip green', title: 'Dopasowano do: ' + p.matched.name }, iconEl('check', 10)) : h('span', { class: 'chip blue', title: 'Nowa osoba' }, 'nowa'),
+            h('span', { class: 'muted small' }, MONTHS_SHORT[mo - 1]))
+          : h('span', { class: 'muted small', style: { paddingLeft: '26px' } }, `${MONTHS[mo - 1]} ${y}`)),
+        Array.from({ length: 31 }, (_, i) => {
+          const d = i + 1;
+          if (d > n) return h('td', { class: 'mx-cell closed' });
+          const dt = new Date(y, mo - 1, d);
+          const cb = h('input', { type: 'checkbox', checked: set.has(d), onchange: (e) => { if (e.target.checked) set.add(d); else set.delete(d); p.months[k] = [...set].sort((a, b) => a - b); sum.textContent = String(set.size); } });
+          return h('td', { class: 'mx-cell' + (unc.has(d) ? ' unc' : '') + (dt.getDay() === 0 || dt.getDay() === 6 ? ' we' : ''), title: `${d} ${MONTHS_GEN[mo - 1]} – ${WD[dt.getDay()]}${unc.has(d) ? ' (niepewny odczyt)' : ''}` }, cb);
+        }), sum));
+    });
+  });
+  return h('div', { class: 'card', style: { marginTop: '16px' } },
+    h('div', { class: 'card-pad', style: { paddingBottom: '8px' } },
+      h('div', { class: 'card-title' }, h('span', { html: icon('table', 16) }), `Odczytane obecności – ${rv.participants.length} ${plural(rv.participants.length, 'osoba', 'osoby', 'osób')}`),
+      rv.legend ? h('p', { class: 'muted small' }, 'Rozpoznane oznaczenia: ' + rv.legend) : null,
+      (rv.breaks || []).length ? h('p', { class: 'muted small' }, 'Przerwy w działalności: ' + rv.breaks.join('; ')) : null,
+      rv.warnings.map((w) => h('div', { class: 'issue warn' }, h('span', { html: icon('warn', 14) }), h('span', null, w))),
+      h('p', { class: 'muted small', style: { marginTop: '6px' } }, 'Zaznaczone pole = obecność. Pomarańczowe = niepewny odczyt, szare kolumny = weekend. Popraw, jeśli trzeba, i zapisz.')),
+    h('div', { class: 'mx-wrap' }, h('table', { class: 'tbl mx' }, h('thead', null, head), h('tbody', null, rows))),
+    h('div', { class: 'card-pad', style: { display: 'flex', gap: '10px', borderTop: '1px solid var(--sep)' } },
+      h('button', { class: 'btn primary lg', onclick: (e) => busy(e.currentTarget, async () => {
+        try {
+          const res = await api.applyParticipants(P.month, rv.participants.filter((p) => !p.skip && p.name.trim()).map((p) => ({ name: p.name.trim(), months: p.months })));
+          toast(`Zapisano obecności ${res.people} ${plural(res.people, 'uczestnika', 'uczestników', 'uczestników')} (${res.months.length} mies.)${res.assigned ? ` · skład zajęć wylosowany dla ${res.assigned} dni` : ''}`, 'success', 6000);
+          P.review = null; P.images = []; P.matrix = null;
+          await loadMonth(); render();
+        } catch (er) { errToast(er); }
+      }, 'Zapisuję…') }, iconEl('check', 16), 'Zapisz obecności'),
+      h('button', { class: 'btn lg', onclick: () => { P.review = null; render(); } }, 'Odrzuć')));
+}
+
+function peopleMatrix() {
+  const P = state.people;
+  const m = P.matrix && P.matrix.key === P.month ? P.matrix : null;
+  if (!m) return h('div', { class: 'card card-pad', style: { marginTop: '16px' } }, spinner(14));
+  const n = m.days.length;
+  const withData = m.people.filter((p) => p.present.length);
+  if (!withData.length) {
+    return h('div', { class: 'card card-pad', style: { marginTop: '16px' } },
+      h('div', { class: 'card-title' }, h('span', { html: icon('people', 16) }), `Obecności uczestników – ${monthLabel(P.month)}`),
+      h('div', { class: 'empty' }, 'Brak zapisanych obecności w tym miesiącu. Wyślij zdjęcie listy powyżej.'));
+  }
+  const perDay = m.days.map((d) => withData.filter((p) => p.present.includes(Number(d.slice(8)))).length);
+  const head = h('tr', null, h('th', { class: 'sticky-col' }, 'Uczestnik'), m.days.map((d, i) => {
+    const dt = parseIso(d);
+    return h('th', { class: 'mx-day' + (dt.getDay() === 0 || dt.getDay() === 6 ? ' we' : '') }, h('div', null, i + 1), h('div', { class: 'wd2' }, WD_SHORT[dt.getDay()]));
+  }), h('th', null, 'Σ'));
+  const rows = withData.map((p) => h('tr', null,
+    h('td', { class: 'sticky-col', title: `${p.firstName} ${p.lastName}` }, h('span', { style: { fontWeight: 550 } }, p.short), h('button', { class: 'icon-btn', style: { width: '22px', height: '22px', marginLeft: '4px' }, title: 'Edytuj dane', onclick: () => editPerson(p), html: icon('gear', 12) })),
+    m.days.map((d, i) => {
+      const on = p.present.includes(i + 1);
+      return h('td', { class: 'mx-cell' + (on ? ' on' : ''), onclick: async () => { try { await api.setPresence(d, p.id, !on); P.matrix = null; await loadMonth(); render(); } catch (e) { errToast(e); } } }, on ? '●' : '');
+    }),
+    h('td', { class: 'muted small' }, String(p.present.length))));
+  const foot = h('tr', null, h('td', { class: 'sticky-col muted small' }, 'Obecnych'), perDay.map((c) => h('td', { class: 'muted small mx-sum' }, c || '')), h('td'));
+  return h('div', { class: 'card', style: { marginTop: '16px' } },
+    h('div', { class: 'card-pad', style: { paddingBottom: '8px' } }, h('div', { class: 'card-title' }, h('span', { html: icon('people', 16) }), `Obecności uczestników – ${monthLabel(P.month)}`, h('span', { class: 'spacer' }), h('span', { class: 'muted small' }, 'Kliknij pole, aby zmienić obecność'))),
+    h('div', { class: 'mx-wrap' }, h('table', { class: 'tbl mx' }, h('thead', null, head), h('tbody', null, rows, foot))));
+}
+
+function editPerson(p) {
+  const fn = h('input', { class: 'input full', value: p.firstName });
+  const ln = h('input', { class: 'input full', value: p.lastName });
+  sheet({
+    title: 'Dane uczestnika',
+    subtitle: 'W dzienniku: pierwsza litera imienia i nazwisko.',
+    body: h('div', null, h('div', { class: 'field' }, h('label', null, 'Imię'), fn), h('div', { class: 'field' }, h('label', null, 'Nazwisko'), ln)),
+    actions: [
+      { label: 'Usuń osobę', kind: 'danger', onClick: async () => { await api.removePerson(p.id); state.people.matrix = null; await loadMonth(); render(); } },
+      { label: 'Anuluj' },
+      { label: 'Zapisz', kind: 'primary', onClick: async () => { await api.updatePerson(p.id, { firstName: fn.value.trim(), lastName: ln.value.trim() }); state.people.matrix = null; await loadMonth(); render(); } }
+    ]
+  });
+}
+
 // ───────────────────────── DZIENNIK ─────────────────────────
 function viewJournal() {
   const md = state.monthData;
@@ -387,8 +543,10 @@ function viewJournal() {
   const days = state.journalFilter === 'entries' ? md.days.filter((d) => d.entry && (d.entry.present || d.entry.absent)) : md.days;
   const genBtn = h('button', { class: 'btn', disabled: !missing.length || !!state.generating, onclick: () => generateTopics(missing.map((d) => d.date)) }, iconEl('sparkles', 14), missing.length ? `Generuj propozycje (${missing.length})` : 'Generuj propozycje');
 
+  const noGroup = md.days.filter((d) => d.entry && d.entry.present && !(d.entry.group || []).length && d.participantsPresent);
+  const grpBtn = noGroup.length ? h('button', { class: 'btn', onclick: async () => { try { const r = await api.assignGroups(noGroup.map((d) => d.date)); toast(`Przydzielono uczestników do ${r.assigned} ${plural(r.assigned, 'dnia', 'dni', 'dni')}`, 'success'); await loadMonth(); render(); } catch (e) { errToast(e); } } }, iconEl('people', 14), `Przydziel uczestników (${noGroup.length})`) : null;
   return h('div', null,
-    h('div', { class: 'toolbar' }, h('h1', null, 'Dziennik'), h('div', { class: 'spacer' }), monthNav(changeMonth), genBtn,
+    h('div', { class: 'toolbar' }, h('h1', null, 'Dziennik'), h('div', { class: 'spacer' }), monthNav(changeMonth), grpBtn, genBtn,
       h('button', { class: 'btn primary', onclick: openExport }, iconEl('doc', 14), 'Eksportuj DOCX')),
     h('div', { class: 'page' },
       h('div', { class: 'filterbar' },
@@ -486,7 +644,45 @@ function dayCard(d) {
 
   return h('div', { class: 'card day' }, dateBox, h('div', { class: 'day-main' }, head,
     e.weekdayNote ? h('p', { class: 'muted small', style: { margin: '-4px 0 8px' } }, `Dopisek przy dniu tygodnia: ( ${e.weekdayNote} )`) : null,
-    topicArea, proposalsEl));
+    groupRow(d), topicArea, proposalsEl));
+}
+
+function groupRow(d) {
+  const e = d.entry;
+  const names = d.groupNames || [];
+  const warn = e.groupWarning;
+  return h('div', { class: 'group-row' },
+    h('span', { class: 'gr-label', html: icon('people', 14) + ' Uczestnicy' }),
+    names.length ? names.map((n) => h('span', { class: 'chip person' }, n))
+      : h('span', { class: 'muted small' }, d.participantsPresent ? `Obecnych ${d.participantsPresent} – kliknij „Losuj”.` : 'Brak danych z listy obecności uczestników.'),
+    warn ? h('span', { class: 'chip orange', title: warn }, iconEl('warn', 11), 'mało osób') : null,
+    h('span', { class: 'spacer' }),
+    d.participantsPresent ? h('button', { class: 'btn plain sm', title: 'Wylosuj inny skład spośród obecnych', onclick: () => rerollGroup(d.date, names.length > 0) }, iconEl('refresh', 12), names.length ? 'Losuj ponownie' : 'Losuj') : null,
+    d.participantsPresent ? h('button', { class: 'btn plain sm', onclick: () => pickGroup(d) }, 'Wybierz…') : h('button', { class: 'btn plain sm', onclick: () => { state.people.month = d.date.slice(0, 7); go('people'); } }, 'Wyślij listę uczestników'));
+}
+
+async function rerollGroup(date, reroll) {
+  try { const r = await api.assignGroups([date], { reroll, force: !reroll }); if (r.warnings.length) toast(r.warnings[0], 'info', 5000); await loadMonth(); render(); } catch (e) { errToast(e); }
+}
+
+async function pickGroup(d) {
+  const present = await api.presentOn(d.date);
+  const chosen = new Set((d.entry.group || []));
+  const min = state.settings.participants.min, max = state.settings.participants.max;
+  const counter = h('span', { class: 'muted small' });
+  const upd = () => { counter.textContent = `Wybrano ${chosen.size} (zalecane ${min}–${max})`; };
+  upd();
+  const list = h('div', { class: 'pick-list' }, present.map((p) => h('label', { class: 'check' },
+    h('input', { type: 'checkbox', checked: chosen.has(p.id), onchange: (ev) => { if (ev.target.checked) chosen.add(p.id); else chosen.delete(p.id); upd(); } }),
+    `${p.firstName} ${p.lastName}`)));
+  sheet({
+    title: 'Uczestnicy zajęć',
+    subtitle: `${longDate(d.date)} – do wyboru tylko osoby obecne tego dnia (${present.length}).`,
+    body: h('div', null, list, counter),
+    actions: [{ label: 'Anuluj' }, { label: 'Zapisz', kind: 'primary', onClick: async () => {
+      try { await api.setGroup(d.date, [...chosen]); await loadMonth(); render(); } catch (e) { errToast(e); }
+    } }]
+  });
 }
 
 async function updateDay(date, patch) {
@@ -534,7 +730,7 @@ async function generateTopics(dates) {
 // ───────────────────────── EKSPORT ─────────────────────────
 async function openExport() {
   const b = monthBounds(state.month);
-  const opts = { mode: 'append', from: b.from, to: b.to, replaceExisting: true };
+  const opts = { mode: 'append', from: b.from, to: b.to, existing: 'participants' };
   let info = null;
   try { info = await api.documentInfo(); } catch (_) { /* ignore */ }
   const md = state.monthData;
@@ -559,7 +755,11 @@ async function openExport() {
       modeHint,
       h('div', { class: 'field' }, h('label', null, 'Okres'), h('div', { style: { display: 'flex', gap: '8px', alignItems: 'center' } }, from, '–', to,
         h('button', { class: 'btn plain sm', onclick: () => { const m = monthBounds(state.month); from.value = opts.from = m.from; to.value = opts.to = m.to; } }, monthLabel(state.month)))),
-      h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: opts.replaceExisting, onchange: (e) => { opts.replaceExisting = e.target.checked; } }), 'Zastąp wiersze z tymi samymi datami (jeśli już są w dzienniku)'),
+      h('div', { class: 'field' }, h('label', null, 'Gdy dzień jest już w dzienniku'), select([
+        { value: 'participants', label: 'Zostaw wiersz bez zmian, dopisz tylko uczestników (jeśli kolumna pusta)' },
+        { value: 'replace', label: 'Zastąp cały wiersz danymi z aplikacji' },
+        { value: 'skip', label: 'Nie zmieniaj istniejących wierszy' }
+      ], opts.existing, (v) => { opts.existing = v; }, { style: { width: '100%' } })),
       missing ? h('div', { class: 'note-box warn', style: { marginTop: '10px' } }, iconEl('warn', 16), h('div', null, `${missing} ${plural(missing, 'dzień obecności nie ma', 'dni obecności nie ma', 'dni obecności nie ma')} tematu – w dokumencie te wiersze będą miały pustą kolumnę „Temat zajęć”.`)) : null),
     actions: [{ label: 'Anuluj' }, { label: 'Eksportuj', kind: 'primary', onClick: () => doExport(opts) }]
   });
@@ -575,7 +775,7 @@ async function doExport(opts) {
       title: 'Dziennik zapisany',
       subtitle: r.path,
       body: h('div', null,
-        h('p', null, `Dodano ${r.stats.added}, zastąpiono ${r.stats.replaced}, pominięto ${r.stats.skipped} ${plural(r.stats.skipped, 'wiersz', 'wiersze', 'wierszy')}.`),
+        h('p', null, `Dodano ${r.stats.added}, zastąpiono ${r.stats.replaced}, uzupełniono uczestników w ${r.stats.filled || 0}, pominięto ${r.stats.skipped} ${plural(r.stats.skipped, 'wiersz', 'wiersze', 'wierszy')}.`),
         r.backup ? h('p', { class: 'muted small', style: { marginTop: '8px' } }, 'Kopia zapasowa poprzedniej wersji: ', h('span', { class: 'path' }, r.backup)) : null),
       actions: [{ label: 'Pokaż w folderze', onClick: () => api.showFile(r.path) }, { label: 'Otwórz dokument', kind: 'primary', onClick: () => api.openFile(r.path) }]
     });
@@ -682,10 +882,11 @@ function viewSettings() {
     { value: 'ai', label: 'Claude', icon: 'cpu' },
     { value: 'schedule', label: 'Harmonogram', icon: 'clock' },
     { value: 'topics', label: 'Tematy', icon: 'sparkles' },
+    { value: 'participants', label: 'Uczestnicy', icon: 'people' },
     { value: 'document', label: 'Dokument', icon: 'doc' },
     { value: 'agent', label: 'Agent', icon: 'bolt' }
   ];
-  const body = { general: settingsGeneral, ai: settingsAi, schedule: settingsSchedule, topics: settingsTopics, document: settingsDocument, agent: settingsAgent }[state.settingsTab]();
+  const body = { general: settingsGeneral, ai: settingsAi, schedule: settingsSchedule, topics: settingsTopics, participants: settingsParticipants, document: settingsDocument, agent: settingsAgent }[state.settingsTab]();
   return h('div', null,
     h('div', { class: 'toolbar' }, h('h1', null, 'Ustawienia')),
     h('div', { class: 'page' },
@@ -800,6 +1001,7 @@ async function importHistory() {
     const r = await api.importHistory();
     if (!r) return;
     toast(`Zaimportowano ${r.added} wpisów (${r.from} – ${r.to})${r.skipped ? `, pominięto ${r.skipped}` : ''}`, 'success', 5000);
+    if (r.duplicates && r.duplicates.length) toast(`Uwaga: w dzienniku te same daty występują więcej niż raz: ${r.duplicates.join(', ')} – sprawdź, czy to nie literówki.`, 'error', 12000);
     await loadMonth();
   } catch (e) { errToast(e); }
 }
@@ -828,6 +1030,17 @@ function settingsDocument() {
       row('Urlopy i dni wolne w tabeli', toggle(f.includeAbsences, (v) => saveSettings({ document: { format: { includeAbsences: v } } }, true)), { icon: 'flag', color: 'var(--orange)', hint: 'Tak jak w Twoim dzienniku: wiersz z opisem (np. „Urlop wypoczynkowy”) i godzinami z harmonogramu.' })
     ]),
     group('Opisy nieobecności (oznaczenia z listy obecności)', Object.keys(labels).map((k) => row(k, textInput(labels[k], (v) => saveSettings({ document: { absenceLabels: { [k]: v } } }, true), { width: '300px' })))));
+}
+
+function settingsParticipants() {
+  const c = state.settings.participants;
+  const nums = Array.from({ length: 15 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }));
+  return h('div', null,
+    group('Skład grupy na zajęciach', [
+      row('Minimalna liczba uczestników', select(nums, String(c.min), (v) => saveSettings({ participants: { min: Number(v) } })), { icon: 'people', color: 'var(--accent)' }),
+      row('Maksymalna liczba uczestników', select(nums, String(c.max), (v) => saveSettings({ participants: { max: Number(v) } })), { icon: 'people', color: 'var(--indigo)' }),
+      row('Losuj automatycznie', toggle(c.autoAssign, (v) => saveSettings({ participants: { autoAssign: v } }, true)), { icon: 'refresh', color: 'var(--purple)', hint: 'Po wczytaniu list obecności aplikacja sama losuje skład dla dni bez uczestników.' })
+    ], 'Losowane są wyłącznie osoby obecne danego dnia według listy obecności uczestników. W dzienniku pojawiają się jako „J. Kowalski” (pierwsza litera imienia i nazwisko).'));
 }
 
 function settingsAgent() {

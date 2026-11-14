@@ -100,5 +100,32 @@ const t = (name, fn) => Promise.resolve().then(fn).then(() => { passed++; consol
     });
   }
 
+  await t('Uczestnicy: losowanie 4–8 tylko spośród obecnych', () => {
+    const { Participants, shortName } = require('../src/main/participants');
+    const pp = new Participants(store);
+    const names = ['Jan Kowalski', 'Anna Nowak', 'Piotr Zieliński', 'Ewa Wójcik', 'Marek Lis', 'Ola Mazur', 'Kuba Król', 'Iza Pawlak', 'Adam Wróbel', 'Zofia Dudek'];
+    pp.applyMonths(names.map((n, i) => ({ name: n, months: { '2026-11': i < 9 ? [2, 3] : [3] } })));
+    for (let round = 0; round < 20; round++) {
+      const r = pp.pick('2026-11-02', { min: 4, max: 8, round });
+      assert(r.ids.length >= 4 && r.ids.length <= 8, 'liczba ' + r.ids.length);
+      const present = pp.presentOn('2026-11-02').map((p) => p.id);
+      assert(r.ids.every((id) => present.includes(id)));
+    }
+    assert.strictEqual(shortName({ firstName: 'Jan Filip', lastName: 'Gutowski' }), 'J. Gutowski');
+    assert.strictEqual(pp.match('KOWALSKI Jan').lastName, 'Kowalski');
+    const few = pp.pick('2026-11-05', { min: 4, max: 8 });
+    assert.strictEqual(few.ids.length, 0);
+  });
+
+  await t('DOCX: dopisanie uczestników do istniejącego wiersza bez zmiany reszty', async () => {
+    const tpl = await Template.load(fs.readFileSync(tplPath));
+    const e = { date: '2026-01-02', absent: false, start: '12:00', end: '15:30', hours: 3.5, topic: { items: ['x'] }, participantNames: ['J. Kowalski', 'A. Nowak'] };
+    const { buffer, stats } = await tpl.build({ entries: [e], fmt: store.settings.document.format, mode: 'append', existing: 'participants' });
+    assert.strictEqual(stats.filled, 1);
+    const back = (await Template.load(buffer)).readEntries()[0];
+    assert.deepStrictEqual(back.participantNames, ['J. Kowalski', 'A. Nowak']);
+    assert.strictEqual(back.absenceLabel, 'Urlop wypoczynkowy'); // treść wiersza bez zmian
+  });
+
   console.log(`\n${passed} testów zaliczonych`);
 })();

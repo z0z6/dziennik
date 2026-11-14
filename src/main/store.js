@@ -48,6 +48,11 @@ const DEFAULT_SETTINGS = {
     extraInstructions: '',
     avoidRepeatDays: 90
   },
+  participants: {
+    min: 4,
+    max: 8,
+    autoAssign: true
+  },
   agent: {
     enabled: true,
     runInBackground: true,
@@ -74,6 +79,7 @@ const DEFAULT_DATA = {
   months: {}, // 'RRRR-MM' -> { days: { 'RRRR-MM-DD': entry }, attendance: [...] }
   daysOff: {}, // 'RRRR-MM-DD' -> { type, label }
   occasionsCache: {}, // 'RRRR-MM' -> { fetchedAt, items: [{date,name,why}] }
+  participants: { roster: [], attendance: {}, uploads: [] },
   agentLog: [],
   notified: {}
 };

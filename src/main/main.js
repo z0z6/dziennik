@@ -6,10 +6,11 @@ const fs = require('fs');
 const { Store } = require('./store');
 const { Calendar, monthKey } = require('./calendar');
 const { Journal, labelFor } = require('./journal');
+const { Participants } = require('./participants');
 const { Agent } = require('./agent');
 const { TopicsService } = require('./topics-service');
 const { ClaudeCodeProvider, ApiProvider, findClaude } = require('./ai/providers');
-const { analyzeAttendance } = require('./ai/tasks');
+const { analyzeAttendance, analyzeParticipantsAttendance } = require('./ai/tasks');
 const { Template } = require('./template-docx');
 
 app.setName('Dziennik WTZ');
@@ -27,7 +28,7 @@ if (!app.requestSingleInstanceLock()) {
 let win = null;
 let tray = null;
 let quitting = false;
-let store, calendar, journal, agent, topics;
+let store, calendar, journal, agent, topics, participants;
 
 const secretsFile = () => path.join(dataDir, 'klucz.bin');
 
@@ -205,10 +206,70 @@ function registerIpc() {
     return { ...review, raw: { month: result.month, employeeName: result.employeeName } };
   });
   handle('attendance:apply', (key, proposed) => {
-    const r = journal.applyAttendance(key, proposed, { days: proposed.filter((p) => p.present).length });
+    journal.applyAttendance(key, proposed, { days: proposed.filter((p) => p.present).length });
+    journal.autoAssignMonth(key);
+    const r = journal.monthView(key);
     emit('data:changed', { month: key });
     return r;
   });
+
+  // ── uczestnicy ──
+  handle('participants:analyze', async (key, images) => {
+    if (!images || !images.length) throw new Error('Nie wybrano zdjęcia.');
+    // każde zdjęcie osobno (zwykle 1 zdjęcie = karta 1 uczestnika), maks. 3 równolegle; wyniki łączone
+    const results = new Array(images.length);
+    let next = 0, done = 0;
+    const provider = getProvider();
+    const worker = async () => {
+      while (next < images.length) {
+        const i = next++;
+        try { results[i] = await analyzeParticipantsAttendance(provider, { images: [images[i]], monthKey: key }); } catch (e) { results[i] = { error: e.message }; }
+        done++;
+        emit('participants:progress', { done, total: images.length });
+      }
+    };
+    await Promise.all([worker(), worker(), worker()].slice(0, Math.min(3, images.length)));
+    const errors = results.map((r, i) => (r && r.error ? `Zdjęcie ${i + 1}: ${r.error}` : null)).filter(Boolean);
+    const ok = results.filter((r) => r && !r.error);
+    if (!ok.length) throw new Error(errors[0] || 'Nie udało się odczytać zdjęć.');
+    const merged = [];
+    const { normalize } = require('./participants');
+    for (const r of ok) {
+      for (const p of r.participants) {
+        const same = merged.find((m) => normalize(m.name) === normalize(p.name));
+        if (!same) { merged.push({ ...p }); continue; }
+        for (const [k, days] of Object.entries(p.months)) same.months[k] = [...new Set([...(same.months[k] || []), ...days])].sort((a, b) => a - b);
+        for (const [k, days] of Object.entries(p.uncertain || {})) same.uncertain[k] = [...new Set([...(same.uncertain[k] || []), ...days])];
+      }
+    }
+    const out = {
+      legend: [...new Set(ok.map((r) => r.legend).filter(Boolean))].slice(0, 2).join(' | '),
+      breaks: [...new Set(ok.flatMap((r) => r.breaks || []))],
+      warnings: [...errors, ...ok.flatMap((r) => r.warnings || [])],
+      participants: merged.map((p) => {
+        const m = participants.match(p.name);
+        return { ...p, matched: m ? { id: m.id, name: `${m.firstName} ${m.lastName}`.trim() } : null };
+      })
+    };
+    store.log('participants', `Odczytano listy obecności uczestników: ${merged.length} osób z ${images.length} zdjęć.`);
+    return out;
+  });
+  handle('participants:apply', (key, rows) => {
+    const r = participants.applyMonths(rows);
+    let assigned = 0; const warnings = [];
+    for (const k of r.months) { const a = journal.autoAssignMonth(k); if (a) { assigned += a.assigned; warnings.push(...a.warnings); } }
+    emit('data:changed', { month: key });
+    return { ...r, assigned, warnings };
+  });
+  handle('participants:matrix', (key) => participants.monthMatrix(key));
+  handle('participants:roster', () => participants.roster);
+  handle('participants:setPresence', (date, id, present) => { participants.setPresence(date, id, present); return true; });
+  handle('participants:updatePerson', (id, patch) => participants.updatePerson(id, patch));
+  handle('participants:addPerson', (name) => { const p = participants.upsert(name); store.save(); return p; });
+  handle('participants:removePerson', (id) => { participants.removePerson(id); return true; });
+  handle('participants:presentOn', (date) => participants.presentOn(date));
+  handle('groups:assign', (dates, opts) => { const r = journal.assignGroups(dates, opts || {}); emit('data:changed', {}); return r; });
+  handle('groups:set', (date, ids) => { const r = journal.updateDay(date, { group: ids, groupWarning: '' }); emit('data:changed', {}); return r; });
 
   handle('topics:generate', async (dates) => {
     const r = await topics.generate(dates);
@@ -242,14 +303,16 @@ function registerIpc() {
     const tpl = await Template.load(fs.readFileSync(r.filePaths[0]));
     const rows = tpl.readEntries();
     if (!rows.length) throw new Error('W pliku nie znaleziono wpisów z datami.');
+    const seen = {}; const duplicates = [];
+    for (const r of rows) { if (seen[r.date]) duplicates.push(r.date); seen[r.date] = true; }
     const res = journal.importHistory(rows);
     if (!store.settings.document.lastJournalPath) store.updateSettings({ document: { lastJournalPath: r.filePaths[0] } });
     emit('data:changed', {});
-    return { ...res, from: rows[0].date, to: rows[rows.length - 1].date };
+    return { ...res, from: rows[0].date, to: rows[rows.length - 1].date, duplicates };
   });
 
   handle('export:docx', async (opts) => {
-    const { mode = 'append', from, to, replaceExisting = true } = opts || {};
+    const { mode = 'append', from, to, replaceExisting = true, existing } = opts || {};
     const entries = journal.entriesInRange(from, to);
     if (!entries.length) throw new Error('Brak wpisów w wybranym okresie – najpierw wyślij listę obecności lub dodaj dni ręcznie.');
     const missing = entries.filter((e) => !e.absent && !(e.topic && (e.topic.items || []).length));
@@ -268,7 +331,7 @@ function registerIpc() {
       sourcePath = templatePath();
     }
     const tpl = await Template.load(fs.readFileSync(sourcePath));
-    const { buffer, stats } = await tpl.build({ entries, fmt: store.settings.document.format, mode, replaceExisting });
+    const { buffer, stats } = await tpl.build({ entries, fmt: store.settings.document.format, mode, replaceExisting, existing });
     const defName = mode === 'append' ? sourcePath : path.join(app.getPath('documents'), `Dziennik psychologa ${from}${from !== to ? '_' + to : ''}.docx`);
     const save = await dialog.showSaveDialog(win, { title: 'Zapisz dziennik', defaultPath: defName, filters: [{ name: 'Dokument Word', extensions: ['docx'] }] });
     if (save.canceled || !save.filePath) return null;
@@ -284,7 +347,7 @@ function registerIpc() {
     const months = [...new Set(entries.map((e) => e.date.slice(0, 7)))];
     for (const k of months) store.month(k).exportedAt = new Date().toISOString();
     store.save();
-    store.log('export', `Zapisano dziennik (${mode === 'append' ? 'dopisano' : 'nowy'}): +${stats.added}, zastąpiono ${stats.replaced}, pominięto ${stats.skipped} – ${path.basename(save.filePath)}`);
+    store.log('export', `Zapisano dziennik (${mode === 'append' ? 'dopisano' : 'nowy'}): +${stats.added}, zastąpiono ${stats.replaced}, uzupełniono uczestników ${stats.filled || 0}, pominięto ${stats.skipped} – ${path.basename(save.filePath)}`);
     return { path: save.filePath, stats, backup, missingTopics: missing.map((e) => e.date) };
   });
   handle('shell:showFile', (p) => shell.showItemInFolder(p));
@@ -302,7 +365,8 @@ app.whenReady().then(() => {
   store = new Store(dataDir);
   nativeTheme.themeSource = store.settings.ui.theme || 'system';
   calendar = new Calendar(store);
-  journal = new Journal(store, calendar);
+  participants = new Participants(store);
+  journal = new Journal(store, calendar, participants);
   topics = new TopicsService({ store, calendar, journal, getProvider, emit });
   agent = new Agent({ store, calendar, journal, getProvider, notify, emit, topicsService: topics });
   registerIpc();

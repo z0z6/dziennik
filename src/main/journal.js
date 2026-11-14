@@ -18,14 +18,54 @@ function markLabel(mark, labels) {
 }
 
 class Journal {
-  constructor(store, calendar) {
+  constructor(store, calendar, participants) {
     this.store = store;
     this.calendar = calendar;
+    this.participants = participants || null;
+  }
+
+  // Losuje skład uczestników zajęć (tylko obecni danego dnia, min–max wg ustawień)
+  assignGroups(dates, { force = false, reroll = false } = {}) {
+    if (!this.participants) return { assigned: 0, warnings: [] };
+    const cfg = this.store.settings.participants || { min: 4, max: 8 };
+    const warnings = [];
+    let assigned = 0;
+    for (const date of dates) {
+      const m = this.store.month(date.slice(0, 7));
+      const e = m.days[date];
+      if (!e || !e.present) continue;
+      if (e.group && e.group.length && !force && !reroll) continue;
+      const round = reroll ? (e.groupRound || 0) + 1 : (e.groupRound || 0);
+      const r = this.participants.pick(date, { min: cfg.min, max: cfg.max, round });
+      if (!r.ids.length) { if (r.warning) warnings.push(`${date}: ${r.warning}`); continue; }
+      e.group = r.ids;
+      e.groupRound = round;
+      e.groupWarning = r.warning || '';
+      if (r.warning) warnings.push(`${date}: ${r.warning}`);
+      assigned++;
+    }
+    this.store.save();
+    return { assigned, warnings };
+  }
+
+  autoAssignMonth(key) {
+    if (!(this.store.settings.participants || {}).autoAssign) return null;
+    const dates = Object.keys(this.store.month(key).days);
+    return this.assignGroups(dates);
   }
 
   monthView(key) {
     const m = this.store.month(key);
-    const days = this.calendar.monthDays(key).map((info) => ({ ...info, entry: m.days[info.date] || null }));
+    const days = this.calendar.monthDays(key).map((info) => {
+      const entry = m.days[info.date] || null;
+      const present = this.participants ? this.participants.presentOn(info.date) : [];
+      return {
+        ...info,
+        entry,
+        participantsPresent: present.length,
+        groupNames: entry && entry.group && this.participants ? this.participants.namesFor(entry.group) : []
+      };
+    });
     const present = days.filter((d) => d.entry && d.entry.present);
     const stats = {
       workdays: days.filter((d) => d.workday).length,
@@ -104,7 +144,7 @@ class Journal {
     // usuń poprzednie wpisy z listy obecności (zachowując tematy)
     const keepTopics = {};
     for (const [date, e] of Object.entries(m.days)) {
-      if (e.topic || (e.proposals && e.proposals.length)) keepTopics[date] = { topic: e.topic, proposals: e.proposals, weekdayNote: e.weekdayNote, participantName: e.participantName };
+      if (e.topic || (e.proposals && e.proposals.length)) keepTopics[date] = { topic: e.topic, proposals: e.proposals, weekdayNote: e.weekdayNote, group: e.group, groupRound: e.groupRound };
       if (e.source === 'lista') delete m.days[date];
     }
     for (const p of proposed) {
@@ -157,7 +197,7 @@ class Journal {
         hours: e.hours,
         topic: e.topic,
         weekdayNote: e.weekdayNote || '',
-        participantName: e.participantName || '',
+        participantNames: e.present && e.group && this.participants ? this.participants.namesFor(e.group) : [],
         absent: !e.present,
         absenceLabel: e.absenceLabel || markLabel(e.mark, this.store.settings.document.absenceLabels)
       }));
@@ -187,6 +227,7 @@ class Journal {
         hours: r.hours || this.computeHours(r.start, r.end),
         topic: r.absent ? null : { title: '', items: r.items },
         weekdayNote: r.weekdayNote || '',
+        group: !r.absent && this.participants && (r.participantNames || []).length ? r.participantNames.map((n) => this.participants.upsert(n).id) : undefined,
         source: 'import'
       };
       added++;

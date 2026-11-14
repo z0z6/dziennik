@@ -329,3 +329,26 @@ code, .mono { font-family: 'SF Mono', ui-monospace, Menlo, Consolas, monospace; 
 ::-webkit-scrollbar-thumb:hover { background-color: rgba(128, 128, 128, .55); }
 .fade-in { animation: fadeIn .25s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } }
+
+/* uczestnicy */
+.group-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.group-row .spacer { flex: 1; }
+.gr-label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--text-2); margin-right: 4px; }
+.chip.person { background: rgba(88, 86, 214, .12); color: var(--indigo); }
+.pick-list { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 16px; margin-bottom: 10px; max-height: 380px; overflow-y: auto; }
+.mx-wrap { overflow-x: auto; max-height: 560px; }
+.tbl.mx th, .tbl.mx td { padding: 4px 3px; text-align: center; }
+.tbl.mx .sticky-col { position: sticky; left: 0; background: var(--card); text-align: left; padding-left: 14px; white-space: nowrap; z-index: 2; }
+.tbl.mx thead .sticky-col { z-index: 3; }
+.mx-day { min-width: 28px; font-size: 11px; }
+.mx-day .wd2 { font-size: 9.5px; color: var(--text-3); font-weight: 500; }
+.mx-day.we { color: var(--text-3); }
+.mx-cell { color: var(--indigo); font-size: 12px; cursor: default; }
+.mx-cell:hover { background: var(--bg-2); }
+.mx-cell.on { background: rgba(88, 86, 214, .08); }
+.mx-cell.unc { background: rgba(255, 149, 0, .22); }
+.mx-cell.closed { background: var(--bg-3); }
+.mx-cell input { accent-color: var(--indigo); margin: 0; }
+.mx-sum { font-variant-numeric: tabular-nums; }
+.mx-cell.we { background: var(--bg-2); }
+tr.first-of-person td { border-top: 1px solid var(--sep-strong); }

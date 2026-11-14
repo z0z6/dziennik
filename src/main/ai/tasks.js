@@ -229,4 +229,58 @@ Zwróć WYŁĄCZNIE JSON w bloku \`\`\`json: { "items": [ { "date": "RRRR-MM-DD"
     .map((i) => ({ date: i.date.slice(0, 10), name: String(i.name).trim(), why: String(i.why || '').trim(), area: 'internet' }));
 }
 
-module.exports = { analyzeAttendance, generateTopics, lookupOccasions, validTime, topicsSystem, topicsPrompt, normalizeSlots, shortTopic };
+
+// ───────────────────────────── Lista obecności uczestników ─────────────────────────────
+
+const PARTICIPANTS_SYSTEM = `Jesteś asystentem, który bardzo dokładnie odczytuje zdjęcia papierowych list obecności UCZESTNIKÓW Warsztatu Terapii Zajęciowej (Polska).
+Spotykane są dwa układy:
+A) „Wykaz obecności uczestnika” – karta JEDNEJ osoby na cały rok: wiersze 1–31 to dni miesiąca, kolumny I–XII to miesiące. Imię i nazwisko jest w nagłówku karty. Zdjęcie może być obrócone o 90°.
+B) Lista miesięczna grupy – wiersze to uczestnicy, kolumny to dni miesiąca 1–31.
+Oznaczenia (ustal je z samej listy, jeśli jest legenda):
+- obecność: „+”, „✓”, „ob”, podpis/parafka;
+- brak obecności: „—” (kreska: weekend, święto, dzień bez zajęć lub nieobecność), „U”/„u” (urlop), „ch”/„L4” (choroba), „nb”, puste pole;
+- przekreślenie kilku komórek dużym „X” = przerwa w działalności warsztatu (brak obecności).
+Sprawdzaj numery wierszy i nagłówki kolumn, żeby poprawnie przypisać dni do miesięcy. Nie zgaduj – nieczytelne pola wpisz do "uncertain".
+Imiona i nazwiska przepisuj dokładnie, z polskimi znakami, w kolejności „Imię Nazwisko”.`;
+
+async function analyzeParticipantsAttendance(provider, { images, monthKey }) {
+  const year = monthKey.slice(0, 4);
+  const res = await provider.run({
+    system: PARTICIPANTS_SYSTEM,
+    prompt: `Odczytaj listy obecności uczestników ze zdjęć (rok ${year}${monthKey ? `, wybrany miesiąc: ${monthLabel(monthKey)}` : ''}). Dla kart rocznych (układ A) odczytaj WSZYSTKIE wypełnione miesiące.
+Zwróć WYŁĄCZNIE obiekt JSON w bloku \`\`\`json:
+{
+  "layout": "A lub B",
+  "legend": "jakie oznaczenia rozpoznałeś",
+  "participants": [
+    { "name": "Imię Nazwisko", "months": { "${year}-01": [7, 8, 9], "${year}-02": [2, 3] }, "uncertain": { "${year}-01": [12] } }
+  ],
+  "breaks": ["${year}-07-20 – ${year}-08-17 (przekreślone)"],
+  "warnings": ["krótkie uwagi"]
+}
+W "months" podaj numery dni, w których uczestnik był OBECNY (oznaczenie „+” lub podpis). Klucze miesięcy w formacie RRRR-MM.`,
+    images,
+    webSearch: false,
+    maxTokens: 16000
+  });
+  const json = extractJson(res.text);
+  const toDays = (a) => [...new Set((Array.isArray(a) ? a : []).map(Number).filter((d) => d >= 1 && d <= 31))].sort((x, y) => x - y);
+  const toMonths = (o) => {
+    const out = {};
+    for (const [k, v] of Object.entries(o && typeof o === 'object' ? o : {})) if (/^\d{4}-\d{2}$/.test(k)) out[k] = toDays(v);
+    return out;
+  };
+  return {
+    layout: json.layout || '',
+    legend: json.legend ? String(json.legend) : '',
+    participants: (json.participants || []).filter((p) => p && p.name).map((p) => {
+      // zgodność wstecz: { days: [...] } dla listy miesięcznej
+      const months = p.months ? toMonths(p.months) : { [monthKey]: toDays(p.days) };
+      return { name: String(p.name).trim(), months, uncertain: toMonths(p.uncertain) };
+    }),
+    breaks: Array.isArray(json.breaks) ? json.breaks.map(String) : [],
+    warnings: Array.isArray(json.warnings) ? json.warnings.map(String) : []
+  };
+}
+
+module.exports = { analyzeParticipantsAttendance, analyzeAttendance, generateTopics, lookupOccasions, validTime, topicsSystem, topicsPrompt, normalizeSlots, shortTopic };

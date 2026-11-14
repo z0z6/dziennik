@@ -25,6 +25,17 @@ contextBridge.exposeInMainWorld('api', {
   analyzeAttendance: (key, images) => call('attendance:analyze', key, images),
   applyAttendance: (key, proposed) => call('attendance:apply', key, proposed),
   generateTopics: (dates) => call('topics:generate', dates),
+  analyzeParticipants: (key, images) => call('participants:analyze', key, images),
+  applyParticipants: (key, rows) => call('participants:apply', key, rows),
+  participantsMatrix: (key) => call('participants:matrix', key),
+  participantsRoster: () => call('participants:roster'),
+  setPresence: (date, id, present) => call('participants:setPresence', date, id, present),
+  updatePerson: (id, patch) => call('participants:updatePerson', id, patch),
+  addPerson: (name) => call('participants:addPerson', name),
+  removePerson: (id) => call('participants:removePerson', id),
+  presentOn: (date) => call('participants:presentOn', date),
+  assignGroups: (dates, opts) => call('groups:assign', dates, opts),
+  setGroup: (date, ids) => call('groups:set', date, ids),
   exportDocx: (opts) => call('export:docx', opts),
   showFile: (p) => call('shell:showFile', p),
   openFile: (p) => call('shell:openFile', p),
@@ -33,7 +44,7 @@ contextBridge.exposeInMainWorld('api', {
   agentRun: () => call('agent:run'),
   occasions: (from, to) => call('occasions:list', from, to),
   on: (channel, fn) => {
-    const allowed = ['agent:status', 'topics:progress', 'data:changed', 'window:state'];
+    const allowed = ['agent:status', 'topics:progress', 'participants:progress', 'data:changed', 'window:state'];
     if (!allowed.includes(channel)) return () => {};
     const h = (_e, payload) => fn(payload);
     ipcRenderer.on(channel, h);

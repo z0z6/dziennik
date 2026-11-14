@@ -109,7 +109,7 @@ function rowValues(entry, fmt) {
     notes: [timeLine, hoursLine].filter(Boolean),
     time: timeLine ? [timeLine] : [],
     hours: hoursLine ? [hoursLine] : [],
-    participant: entry.participantName ? [entry.participantName] : [],
+    participant: entry.absent ? [] : (entry.participantNames && entry.participantNames.length ? entry.participantNames : (entry.participantName ? [entry.participantName] : [])),
     signature: [],
     other: []
   };
@@ -202,14 +202,34 @@ class Template {
     return `${this.trOpen}${this.trPr}${cells.join('')}</w:tr>`;
   }
 
+  // Podmienia zawartość jednej kolumny w istniejącym wierszu (reszta wiersza bez zmian)
+  fillRole(rowXml, role, lines, { onlyIfEmpty = true } = {}) {
+    const idx = this.roles.indexOf(role);
+    if (idx < 0 || !lines.length) return { xml: rowXml, changed: false };
+    const cells = findBlocks(rowXml, 'tc');
+    const c = cells[idx];
+    if (!c) return { xml: rowXml, changed: false };
+    const cellXml = rowXml.slice(c.start, c.end);
+    if (onlyIfEmpty && cellLines(cellXml).length) return { xml: rowXml, changed: false };
+    const paras = cellParas(cellXml);
+    const proto = (this.protoCells[idx] && cellParas(this.protoCells[idx])[0]) || paras[0];
+    const tcPr = inner(cellXml, 'tcPr');
+    const body = lines.map((ln) => buildPara(proto, ln)).join('');
+    const newCell = `<w:tc>${tcPr}${body}</w:tc>`;
+    return { xml: rowXml.slice(0, c.start) + newCell + rowXml.slice(c.end), changed: true };
+  }
+
   existingRows() {
     return this.rows.slice(1).map((r) => ({ ...r, date: parseRowDate(r.xml) }));
   }
 
-  async build({ entries, fmt, mode = 'new', replaceExisting = true }) {
+  // existing: 'replace' – wiersz z tą datą budowany od nowa; 'participants' – zostaje bez zmian,
+  // dopisujemy tylko uczestników (gdy kolumna pusta); 'skip' – bez zmian
+  async build({ entries, fmt, mode = 'new', replaceExisting = true, existing }) {
+    const existingMode = existing || (replaceExisting ? 'replace' : 'skip');
     const f = { ...DEFAULT_FORMAT, ...(fmt || {}) };
     const list = entries.filter((e) => f.includeAbsences || !e.absent).sort((a, b) => a.date.localeCompare(b.date));
-    const stats = { added: 0, replaced: 0, skipped: 0 };
+    const stats = { added: 0, replaced: 0, skipped: 0, filled: 0 };
     let rowsOut; // tablica { date, xml }
     if (mode === 'append') {
       rowsOut = this.existingRows().map((r) => ({ date: r.date, xml: r.xml }));
@@ -217,7 +237,10 @@ class Template {
         const xml = this.renderRow(e, f);
         const idx = rowsOut.findIndex((r) => r.date === e.date);
         if (idx >= 0) {
-          if (replaceExisting) { rowsOut[idx] = { date: e.date, xml }; stats.replaced++; } else stats.skipped++;
+          if (existingMode === 'replace') { rowsOut[idx] = { date: e.date, xml }; stats.replaced++; } else if (existingMode === 'participants') {
+            const r = this.fillRole(rowsOut[idx].xml, 'participant', rowValues(e, f).participant);
+            if (r.changed) { rowsOut[idx] = { date: e.date, xml: r.xml }; stats.filled = (stats.filled || 0) + 1; } else stats.skipped++;
+          } else stats.skipped++;
           continue;
         }
         // wstaw po ostatnim wierszu o wcześniejszej dacie
@@ -272,6 +295,7 @@ class Template {
       const noteMatch = wd.match(/\(\s*([\s\S]*?)\s*\)/);
       out.push({
         date, start, end, hours, absent,
+        participantNames: get('participant'),
         absenceLabel: absent ? items[0] : '',
         items: absent ? [] : items,
         weekdayNote: noteMatch ? noteMatch[1].replace(/\s+/g, ' ').replace(/-\s+/g, '') : ''
