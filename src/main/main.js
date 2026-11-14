@@ -167,10 +167,15 @@ function registerIpc() {
   }));
 
   handle('window:control', (action) => {
-    if (!win) return;
-    if (action === 'close') win.close();
-    else if (action === 'minimize') win.minimize();
-    else if (action === 'maximize') (win.isMaximized() ? win.unmaximize() : win.maximize());
+    if (!win) return false;
+    if (action === 'close') { win.close(); return false; }
+    if (action === 'minimize') { win.minimize(); return win.isMaximized(); }
+    if (action === 'maximize') {
+      // na Linuksie (re)maksymalizacja jest asynchroniczna – zwracamy stan docelowy
+      const target = !win.isMaximized();
+      if (target) win.maximize(); else win.unmaximize();
+      return target;
+    }
     return win.isMaximized();
   });
 

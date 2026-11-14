@@ -58,7 +58,11 @@ async function init() {
   await loadSettings();
   await Promise.all([loadMonth(), loadAgent()]);
 
-  document.querySelectorAll('#traffic .tl').forEach((b) => b.addEventListener('click', () => api.windowControl(b.dataset.act)));
+  document.querySelectorAll('#traffic .tl').forEach((b) => b.addEventListener('click', async () => {
+    const maximized = await api.windowControl(b.dataset.act);
+    if (b.dataset.act === 'maximize') setMaxTitle(maximized);
+  }));
+  api.on('window:state', (s) => setMaxTitle(s.maximized));
   document.querySelector('.titlebar').addEventListener('dblclick', (e) => { if (!e.target.closest('.traffic')) api.windowControl('maximize'); });
   window.addEventListener('blur', () => document.body.classList.add('window-blur'));
   window.addEventListener('focus', () => document.body.classList.remove('window-blur'));
@@ -69,6 +73,11 @@ async function init() {
   api.on('participants:progress', (p) => { state.people.progress = p; if (state.view === 'people' && state.people.analyzing) { const el = document.getElementById('people-progress'); if (el) el.textContent = `Odczytano ${p.done} z ${p.total} zdjęć…`; } });
   api.on('data:changed', async () => { await loadMonth(); if (state.view !== 'attendance') render(); else renderSidebar(); });
   render();
+}
+
+function setMaxTitle(maximized) {
+  const b = document.querySelector('#traffic .tl.max');
+  if (b) b.title = maximized ? 'Przywróć' : 'Maksymalizuj';
 }
 
 async function loadSettings() {
