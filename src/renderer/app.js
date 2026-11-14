@@ -24,6 +24,7 @@ const state = {
   journalFilter: 'entries',
   editing: {}, // date -> true
   settingsTab: 'general',
+  claude: { status: null, login: null, installing: false, log: '', advanced: false },
   docInfo: null
 };
 
@@ -70,9 +71,17 @@ async function init() {
 
   api.on('agent:status', (s) => { state.agent = s; renderSidebar(); if (state.view === 'dashboard') render(); });
   api.on('topics:progress', (p) => { state.generating = p.done < p.total ? p : null; if (state.view === 'journal') render(); });
+  api.on('claude:log', (t) => { state.claude.log = (state.claude.log + t).slice(-4000); if (state.view === 'settings') { const el = document.querySelector('.acc-log'); if (el) el.textContent = state.claude.log.split('\n').slice(-6).join('\n'); } });
+  api.on('claude:login', (ev) => {
+    const C = state.claude;
+    if (ev.stage === 'url' || ev.stage === 'code') { C.login = { ...(C.login || {}), stage: ev.stage, url: ev.url || (C.login && C.login.url) }; if (state.view === 'settings') render(); }
+    if (ev.stage === 'done') { C.login = null; C.status = ev.status; toast('Połączono z kontem Claude', 'success'); render(); }
+    if (ev.stage === 'error') { C.login = null; errToast(new Error(ev.error)); render(); }
+  });
   api.on('participants:progress', (p) => { state.people.progress = p; if (state.view === 'people' && state.people.analyzing) { const el = document.getElementById('people-progress'); if (el) el.textContent = `Odczytano ${p.done} z ${p.total} zdjęć…`; } });
   api.on('data:changed', async () => { await loadMonth(); if (state.view !== 'attendance') render(); else renderSidebar(); });
   render();
+  if (state.settings.ai.provider === 'claude-code') refreshClaude();
 }
 
 function setMaxTitle(maximized) {
@@ -184,6 +193,12 @@ function viewDashboard() {
     h('div', { class: 'toolbar' }, h('h1', null, 'Pulpit'), h('div', { class: 'spacer' }), monthNav(changeMonth)),
     h('div', { class: 'page' },
       h('div', { class: 'hello' }, h('h1', null, `${greet}${name ? ', ' + name : ''}`), h('p', null, longDate(todayIso()).replace(/^./, (c) => c.toUpperCase()))),
+      state.settings.ai.provider === 'claude-code' && state.claude.status && !state.claude.status.loggedIn
+        ? h('div', { class: 'card connect-banner' },
+          h('div', { class: 'acc-logo', html: icon('key', 22) }),
+          h('div', { style: { flex: 1 } }, h('div', { class: 'acc-title' }, 'Połącz aplikację z kontem Claude'), h('div', { class: 'muted small' }, 'Jedno kliknięcie – potem zalogujesz się na stronie Claude, a agent będzie mógł odczytywać listy i proponować tematy.')),
+          h('button', { class: 'btn primary lg', onclick: () => { state.settingsTab = 'ai'; go('settings'); } }, 'Połącz'))
+        : null,
       h('div', { class: 'grid grid-3', style: { marginBottom: '16px' } },
         h('div', { class: 'hero blue', onclick: () => go('attendance') },
           h('div', { class: 'hero-ic', html: icon('camera', 22) }),
@@ -924,12 +939,83 @@ function settingsGeneral() {
     ]));
 }
 
+function accountCard() {
+  const C = state.claude;
+  const st = C.status;
+  const wrap = h('div', { class: 'account' });
+  if (!st) {
+    wrap.append(h('div', { class: 'acc-row' }, spinner(18), h('span', { class: 'muted' }, 'Sprawdzam połączenie z kontem Claude…')));
+    return wrap;
+  }
+  const logo = (cls) => h('div', { class: 'acc-logo ' + (cls || ''), html: icon(st.loggedIn ? 'checkCircle' : 'person', 24) });
+  if (st.loggedIn) {
+    wrap.append(h('div', { class: 'acc-row' }, logo('ok'),
+      h('div', { style: { flex: 1 } },
+        h('div', { class: 'acc-title' }, 'Połączono z kontem Claude'),
+        h('div', { class: 'muted small' }, [st.email, st.plan ? `plan ${st.plan}` : null].filter(Boolean).join(' · ') || 'Aplikacja korzysta z Twojego planu Claude.')),
+      h('button', { class: 'btn', onclick: (e) => busy(e.currentTarget, async () => { try { const r = await api.testAi(); toast(r, 'success', 5000); } catch (er) { errToast(er); } }, 'Testuję…') }, iconEl('bolt', 14), 'Testuj'),
+      h('button', { class: 'btn danger', onclick: async () => { try { C.status = await api.claudeLogout(); render(); } catch (er) { errToast(er); } } }, 'Wyloguj')));
+    return wrap;
+  }
+  if (!st.installed) {
+    wrap.append(h('div', { class: 'acc-row' }, logo(),
+      h('div', { style: { flex: 1 } },
+        h('div', { class: 'acc-title' }, 'Połącz aplikację ze swoim kontem Claude'),
+        h('div', { class: 'muted small' }, 'Jednorazowo zainstaluję oficjalny program Claude Code od Anthropic (ok. 1 minuty), a potem otworzę stronę logowania Claude.')),
+      h('button', { class: 'btn primary lg', disabled: C.installing || null, onclick: installAndLogin }, C.installing ? spinner(14) : iconEl('upload', 15), C.installing ? 'Instaluję…' : 'Zainstaluj i połącz')));
+    if (C.installing || C.log) wrap.append(h('pre', { class: 'acc-log' }, (C.log || '').split('\n').slice(-6).join('\n')));
+    return wrap;
+  }
+  const L = C.login;
+  if (!L) {
+    wrap.append(h('div', { class: 'acc-row' }, logo(),
+      h('div', { style: { flex: 1 } },
+        h('div', { class: 'acc-title' }, 'Zaloguj się swoim kontem Claude'),
+        h('div', { class: 'muted small' }, 'Otworzy się strona logowania Claude w przeglądarce – zaloguj się tak samo jak na claude.ai.')),
+      h('button', { class: 'btn primary lg', onclick: startLogin }, iconEl('key', 15), 'Zaloguj się')));
+    return wrap;
+  }
+  const code = h('input', { class: 'input', style: { flex: 1 }, placeholder: 'Wklej kod ze strony logowania (jeśli się pojawił)' });
+  wrap.append(
+    h('div', { class: 'acc-row' }, h('div', { class: 'acc-logo' }, spinner(20)),
+      h('div', { style: { flex: 1 } },
+        h('div', { class: 'acc-title' }, 'Czekam na zalogowanie w przeglądarce…'),
+        h('div', { class: 'muted small' }, 'Zaloguj się na stronie Claude, która otworzyła się w przeglądarce. Po zalogowaniu aplikacja połączy się sama.')),
+      h('button', { class: 'btn', onclick: async () => { await api.claudeCancel(); C.login = null; render(); } }, 'Anuluj')),
+    h('div', { class: 'acc-sub' },
+      L.url ? h('button', { class: 'btn plain sm', onclick: () => api.openExternal(L.url) }, iconEl('globe', 12), 'Przeglądarka się nie otworzyła? Otwórz stronę logowania') : null,
+      h('div', { style: { display: 'flex', gap: '8px', marginTop: '8px' } }, code,
+        h('button', { class: 'btn primary', onclick: async () => { if (!code.value.trim()) return; try { await api.claudeCode(code.value); toast('Przekazano kod – trwa łączenie…', 'info', 3000); } catch (er) { errToast(er); } } }, 'Zatwierdź kod'))));
+  return wrap;
+}
+
+async function refreshClaude() {
+  try { state.claude.status = await api.claudeStatus(); } catch (e) { state.claude.status = { installed: false, loggedIn: false }; }
+  renderSidebar();
+  if (state.view === 'settings' || state.view === 'dashboard') render();
+}
+
+async function installAndLogin() {
+  const C = state.claude;
+  C.installing = true; C.log = ''; render();
+  try {
+    C.status = await api.claudeInstall();
+    C.installing = false; render();
+    if (C.status.installed && !C.status.loggedIn) await startLogin();
+  } catch (e) { C.installing = false; errToast(e); render(); }
+}
+
+async function startLogin() {
+  const C = state.claude;
+  try { C.login = { stage: 'start' }; render(); await api.claudeLogin(); await loadSettings(); } catch (e) { C.login = null; errToast(e); render(); }
+}
+
 function settingsAi() {
   const s = state.settings;
   const status = h('div', { class: 'status-line' });
-  const isCC = s.ai.provider === 'claude-code';
-  const ccStatus = state.claudePath ? h('div', { class: 'status-line ok' }, iconEl('checkCircle', 14), 'Znaleziono: ', h('span', { class: 'path' }, state.claudePath))
-    : h('div', { class: 'status-line bad' }, iconEl('warn', 14), 'Nie znaleziono Claude Code na tym komputerze');
+  const adv = state.claude.advanced || s.ai.provider === 'api';
+  const ccStatus = state.claudePath ? h('div', { class: 'status-line ok' }, iconEl('checkCircle', 14), h('span', { class: 'path' }, state.claudePath))
+    : h('div', { class: 'status-line bad' }, iconEl('warn', 14), 'Nie znaleziono Claude Code');
   const testBtn = h('button', { class: 'btn' }, iconEl('bolt', 14), 'Testuj połączenie');
   testBtn.addEventListener('click', () => busy(testBtn, async () => {
     status.className = 'status-line';
@@ -939,27 +1025,28 @@ function settingsAi() {
   const keyInput = h('input', { class: 'input', type: 'password', style: { width: '300px' }, placeholder: state.hasApiKey ? '•••••••• (zapisany)' : 'sk-ant-…' });
 
   return h('div', null,
-    group('Sposób połączenia z Claude', [
-      row('Dostawca', segmented([{ value: 'claude-code', label: 'Moje konto Claude' }, { value: 'api', label: 'Klucz API' }], s.ai.provider, async (v) => { await saveSettings({ ai: { provider: v } }, true); render(); }), { icon: 'cpu', color: 'var(--accent)' })
-    ], isCC
-      ? 'Aplikacja korzysta z Twojego planu Claude (Pro/Max) przez oficjalny program Claude Code zainstalowany na tym komputerze. To jedyny sposób dozwolony przez Anthropic – zewnętrzne aplikacje nie mogą logować się kontem Claude.ai bezpośrednio.'
-      : 'Klucz API z platform.claude.com – rozliczany osobno, za faktyczne zużycie. Klucz jest przechowywany zaszyfrowany na tym komputerze.'),
-    isCC ? group('Claude Code', [
-      row('Program', h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' } }, ccStatus,
-        h('div', { style: { display: 'flex', gap: '6px' } },
-          h('button', { class: 'btn sm', onclick: async () => { try { const p = await api.browseClaude(); if (p) { await loadSettings(); render(); } } catch (e) { errToast(e); } } }, 'Wskaż ręcznie…'),
-          h('button', { class: 'btn sm', onclick: () => api.openExternal('https://claude.com/product/claude-code') }, 'Jak zainstalować?'))), { icon: 'cpu', color: 'var(--orange)', hint: 'Po instalacji uruchom raz w terminalu „claude” i zaloguj się swoim kontem.' }),
-      row('Model', select([{ value: 'sonnet', label: 'Sonnet (zalecany)' }, { value: 'opus', label: 'Opus (najmocniejszy)' }, { value: 'haiku', label: 'Haiku (najszybszy)' }], s.ai.model, (v) => saveSettings({ ai: { model: v } })), { icon: 'sparkles', color: 'var(--purple)' })
-    ]) : group('Klucz API', [
-      row('Klucz', h('div', { style: { display: 'flex', gap: '6px' } }, keyInput,
-        h('button', { class: 'btn', onclick: async () => { try { state.hasApiKey = await api.setApiKey(keyInput.value); keyInput.value = ''; toast(state.hasApiKey ? 'Zapisano klucz' : 'Usunięto klucz', 'success'); render(); } catch (e) { errToast(e); } } }, 'Zapisz')), { icon: 'key', color: 'var(--green)' }),
-      row('Model', select([{ value: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5 (zalecany)' }, { value: 'claude-opus-5-5', label: 'Claude Opus 5.5' }, { value: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' }], s.ai.apiModel, (v) => saveSettings({ ai: { apiModel: v } })), { icon: 'sparkles', color: 'var(--purple)' }),
-      row('Pobierz klucz', h('button', { class: 'btn sm', onclick: () => api.openExternal('https://platform.claude.com/settings/keys') }, 'platform.claude.com'), { icon: 'globe', color: 'var(--teal)' })
-    ]),
-    group('Internet', [
+    s.ai.provider === 'claude-code' ? h('div', { class: 'group' }, h('h3', { class: 'group-title' }, 'Konto Claude'), h('div', { class: 'group-body' }, accountCard()),
+      h('p', { class: 'group-footer' }, 'Logujesz się na oficjalnej stronie Claude – aplikacja nie widzi Twojego hasła i nie przechowuje danych logowania. Zapytania wykonuje program Claude Code w ramach Twojego planu (Pro/Max).')) : null,
+    group('Model', [
+      s.ai.provider === 'claude-code'
+        ? row('Model Claude', select([{ value: 'sonnet', label: 'Sonnet (zalecany)' }, { value: 'opus', label: 'Opus (najmocniejszy)' }, { value: 'haiku', label: 'Haiku (najszybszy)' }], s.ai.model, (v) => saveSettings({ ai: { model: v } })), { icon: 'sparkles', color: 'var(--purple)' })
+        : row('Model Claude', select([{ value: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5 (zalecany)' }, { value: 'claude-opus-5-5', label: 'Claude Opus 5.5' }, { value: 'claude-haiku-5-5', label: 'Claude Haiku 5.5' }], s.ai.apiModel, (v) => saveSettings({ ai: { apiModel: v } })), { icon: 'sparkles', color: 'var(--purple)' }),
       row('Wyszukiwanie w internecie przy tematach', toggle(s.ai.useWebSearch, (v) => saveSettings({ ai: { useWebSearch: v } }, true)), { icon: 'globe', color: 'var(--teal)', hint: 'Agent sprawdza aktualne dni okolicznościowe, kampanie i zmiany w uprawnieniach osób z niepełnosprawnościami.' })
     ]),
-    h('div', { class: 'group', style: { display: 'flex', alignItems: 'center', gap: '12px' } }, testBtn, status));
+    h('div', { class: 'group' }, h('button', { class: 'btn plain', onclick: () => { state.claude.advanced = !adv; render(); } }, iconEl(adv ? 'chevronL' : 'chevronR', 12), adv ? 'Ukryj ustawienia zaawansowane' : 'Ustawienia zaawansowane')),
+    adv ? h('div', null,
+      group('Sposób połączenia', [
+        row('Dostawca', segmented([{ value: 'claude-code', label: 'Konto Claude' }, { value: 'api', label: 'Klucz API' }], s.ai.provider, async (v) => { await saveSettings({ ai: { provider: v } }, true); render(); }), { icon: 'cpu', color: 'var(--accent)' })
+      ], 'Klucz API (platform.claude.com) jest rozliczany osobno, za faktyczne zużycie – niezależnie od planu Claude.'),
+      s.ai.provider === 'api' ? group('Klucz API', [
+        row('Klucz', h('div', { style: { display: 'flex', gap: '6px' } }, keyInput,
+          h('button', { class: 'btn', onclick: async () => { try { state.hasApiKey = await api.setApiKey(keyInput.value); keyInput.value = ''; toast(state.hasApiKey ? 'Zapisano klucz' : 'Usunięto klucz', 'success'); render(); } catch (e) { errToast(e); } } }, 'Zapisz')), { icon: 'key', color: 'var(--green)' }),
+        row('Pobierz klucz', h('button', { class: 'btn sm', onclick: () => api.openExternal('https://platform.claude.com/settings/keys') }, 'platform.claude.com'), { icon: 'globe', color: 'var(--teal)' })
+      ]) : group('Claude Code', [
+        row('Program', h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', alignItems: 'flex-end' } }, ccStatus,
+          h('button', { class: 'btn sm', onclick: async () => { try { const p = await api.browseClaude(); if (p) { await loadSettings(); await refreshClaude(); } } catch (e) { errToast(e); } } }, 'Wskaż ręcznie…')), { icon: 'cpu', color: 'var(--orange)' })
+      ]),
+      h('div', { class: 'group', style: { display: 'flex', alignItems: 'center', gap: '12px' } }, testBtn, status)) : null);
 }
 
 function settingsSchedule() {

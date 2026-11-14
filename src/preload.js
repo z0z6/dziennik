@@ -18,6 +18,12 @@ contextBridge.exposeInMainWorld('api', {
   importHistory: () => call('history:import'),
   setApiKey: (k) => call('apikey:set', k),
   testAi: () => call('ai:test'),
+  claudeStatus: () => call('claude:status'),
+  claudeInstall: () => call('claude:install'),
+  claudeLogin: () => call('claude:login'),
+  claudeCode: (code) => call('claude:code', code),
+  claudeCancel: () => call('claude:cancel'),
+  claudeLogout: () => call('claude:logout'),
   browseClaude: () => call('ai:browseClaude'),
   getMonth: (key) => call('month:get', key),
   updateDay: (date, patch) => call('day:update', date, patch),
@@ -44,7 +50,7 @@ contextBridge.exposeInMainWorld('api', {
   agentRun: () => call('agent:run'),
   occasions: (from, to) => call('occasions:list', from, to),
   on: (channel, fn) => {
-    const allowed = ['agent:status', 'topics:progress', 'participants:progress', 'data:changed', 'window:state'];
+    const allowed = ['agent:status', 'topics:progress', 'participants:progress', 'data:changed', 'window:state', 'claude:log', 'claude:login'];
     if (!allowed.includes(channel)) return () => {};
     const h = (_e, payload) => fn(payload);
     ipcRenderer.on(channel, h);

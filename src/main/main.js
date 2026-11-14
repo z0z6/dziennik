@@ -7,6 +7,7 @@ const { Store } = require('./store');
 const { Calendar, monthKey } = require('./calendar');
 const { Journal, labelFor } = require('./journal');
 const { Participants } = require('./participants');
+const { ClaudeAccount } = require('./claude-account');
 const { Agent } = require('./agent');
 const { TopicsService } = require('./topics-service');
 const { ClaudeCodeProvider, ApiProvider, findClaude } = require('./ai/providers');
@@ -28,7 +29,7 @@ if (!app.requestSingleInstanceLock()) {
 let win = null;
 let tray = null;
 let quitting = false;
-let store, calendar, journal, agent, topics, participants;
+let store, calendar, journal, agent, topics, participants, account;
 
 const secretsFile = () => path.join(dataDir, 'klucz.bin');
 
@@ -188,6 +189,12 @@ function registerIpc() {
   });
   handle('apikey:set', (key) => { setApiKey((key || '').trim()); return !!getApiKey(); });
   handle('ai:test', async () => getProvider().test());
+  handle('claude:status', () => account.status());
+  handle('claude:install', () => account.install());
+  handle('claude:login', () => { store.updateSettings({ ai: { provider: 'claude-code' } }); return account.startLogin(); });
+  handle('claude:code', (code) => account.submitCode(code));
+  handle('claude:cancel', () => { account.cancelLogin(); return true; });
+  handle('claude:logout', () => account.logout());
   handle('ai:browseClaude', async () => {
     const r = await dialog.showOpenDialog(win, { title: 'Wskaż program Claude Code', properties: ['openFile'] });
     if (r.canceled || !r.filePaths[0]) return null;
@@ -371,6 +378,7 @@ app.whenReady().then(() => {
   nativeTheme.themeSource = store.settings.ui.theme || 'system';
   calendar = new Calendar(store);
   participants = new Participants(store);
+  account = new ClaudeAccount({ getSettings: () => store.settings, emit });
   journal = new Journal(store, calendar, participants);
   topics = new TopicsService({ store, calendar, journal, getProvider, emit });
   agent = new Agent({ store, calendar, journal, getProvider, notify, emit, topicsService: topics });
@@ -381,7 +389,7 @@ app.whenReady().then(() => {
   app.on('activate', showWindow);
 });
 
-app.on('before-quit', () => { quitting = true; });
+app.on('before-quit', () => { quitting = true; if (account) account.cancelLogin(); });
 app.on('window-all-closed', () => {
   if (!store || !store.settings.agent.runInBackground || !tray) app.quit();
 });
